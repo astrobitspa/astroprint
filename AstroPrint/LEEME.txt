@@ -1,22 +1,27 @@
-AstrobitPrint - agente de impresion para impresoras no Zebra
-============================================================
+AstroPrint - imprime las etiquetas de Astrobit en tu impresora de etiquetas
+===========================================================================
 
 Que hace
-  Reemplaza a Zebra Browser Print en este PC. La ERP sigue funcionando igual,
-  pero las etiquetas ZPL se mandan a la impresora que elijas (por ejemplo, la Xprinter XP-420B).
+  Reemplaza a Zebra Browser Print en este PC. La ERP sigue funcionando igual, pero las
+  etiquetas se mandan a la impresora de Windows que elijas. Sirve con impresoras de etiquetas
+  que entienden ZPL: Zebra, Xprinter (XP-420B y otras) y otras termicas con emulacion ZPL.
+  Solo Windows.
 
 Antes de instalar
-  - La impresora debe imprimir la pagina de prueba de Windows (ya lo verificaste).
+  - La impresora debe estar instalada en Windows e imprimir su pagina de prueba.
   - Cierra Text2Barcode si esta abierto (usa los mismos puertos). El instalador igual lo detecta.
+  - Si este PC tiene AstrobitPrint (el nombre anterior de AstroPrint), el instalador lo
+    reemplaza y conserva su impresora y su configuracion.
 
 Instalar
-  1. Copia la carpeta AstrobitPrint al PC (por ejemplo, al Escritorio).
-  2. Doble clic en install.bat y acepta los permisos de administrador.
+  1. Descomprime AstroPrint.zip (clic derecho > Extraer todo), por ejemplo en el Escritorio.
+  2. Doble clic en install.bat y acepta los permisos de administrador. Si Windows avisa que el
+     archivo viene de internet, elige "Ejecutar" (o "Mas informacion" > "Ejecutar de todas formas").
   3. Escribe el numero de la impresora de etiquetas cuando lo pida.
      Al final espera a que el agente responda: puede tardar hasta 3 minutos.
   4. Cierra y vuelve a abrir el navegador. Imprime una etiqueta desde la ERP.
 
-Queda instalado en C:\ProgramData\AstrobitPrint y arranca solo con Windows. Una tarea vigia
+Queda instalado en C:\ProgramData\AstroPrint y arranca solo con Windows. Una tarea vigia
 lo revisa cada minuto: si el agente se cayo, lo vuelve a levantar. El instalador pregunta si
 evitar que el PC se suspenda (recomendado en bodega: suspendido no imprime).
 
@@ -35,11 +40,12 @@ Que imprime
   de dejar la etiqueta esperando en Windows para salir mas tarde.
 
 Cambiar de impresora
-  Vuelve a ejecutar install.bat, o edita C:\ProgramData\AstrobitPrint\config.json
+  Vuelve a ejecutar install.bat, o edita C:\ProgramData\AstroPrint\config.json
   y reinicia el PC.
 
 Si algo falla
-  Revisa C:\ProgramData\AstrobitPrint\agent.log
+  Revisa C:\ProgramData\AstroPrint\agent.log
+  Prueba en el navegador: https://127.0.0.1:9101/  (debe mostrar la version de AstroPrint)
   Prueba en el navegador: https://127.0.0.1:9101/default  (debe mostrar el nombre de la impresora)
   En la ERP: Configuracion > Impresora > "Buscar impresora predeterminada" (saca al navegador
   del modo PDF). Si dice que no encontro impresora, en Chrome dale al sitio el permiso de
@@ -49,4 +55,5 @@ Si algo falla
 Desinstalar
   Doble clic en uninstall.bat. Restaura Browser Print en el inicio si estaba.
 
-Nota: en este PC deja de funcionar Zebra Browser Print. Usalo solo en PCs con impresoras no Zebra.
+Nota: en este PC AstroPrint reemplaza a Zebra Browser Print (usan los mismos puertos): no uses
+los dos a la vez.

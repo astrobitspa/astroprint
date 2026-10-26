@@ -1,0 +1,33 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag matches the agent's version
+        run: |
+          version=$(grep -oP "^\\\$Version = '\K[^']+" AstroPrint/agent.ps1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "agent.ps1 says $version but the tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Zip
+        run: zip -r AstroPrint.zip AstroPrint
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" AstroPrint.zip \
+            --title "AstroPrint ${GITHUB_REF_NAME#v}" \
+            --notes "Descarga AstroPrint.zip, descomprímelo y abre install.bat. Instrucciones en LEEME.txt."

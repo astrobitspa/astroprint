@@ -1,11 +1,23 @@
-﻿# Instalador de AstrobitPrint (ejecutar como administrador; install.bat lo hace solo)
+﻿# Instalador de AstroPrint (ejecutar como administrador; install.bat lo hace solo)
 # Sin preguntas: install.ps1 -Printer "Xprinter XP-420B" -KeepAwake S
 param([string]$Printer, [ValidateSet('S', 'N', '')][string]$KeepAwake = '')
 $ErrorActionPreference = 'Stop'
 $Src       = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Dest      = Join-Path $env:ProgramData 'AstrobitPrint'
-$TaskName  = 'AstrobitPrint'
+$Dest      = Join-Path $env:ProgramData 'AstroPrint'
+$TaskName  = 'AstroPrint'
 $AppId     = '{6f4b1c2e-8a3d-4e5f-9b7a-1c2d3e4f5a6b}'
+# Hasta la version 7 se llamaba AstrobitPrint: se reemplaza conservando su configuracion.
+$OldName   = 'AstrobitPrint'
+$OldDest   = Join-Path $env:ProgramData $OldName
+
+# La configuracion de una instalacion anterior (gapMedia, labelLengthDots...) se conserva.
+$prevCfg = $null
+foreach ($dir in @($Dest, $OldDest)) {
+    $f = Join-Path $dir 'config.json'
+    if (-not $prevCfg -and (Test-Path $f)) {
+        try { $prevCfg = Get-Content $f -Raw | ConvertFrom-Json } catch { }
+    }
+}
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 
@@ -20,12 +32,18 @@ if ($Printer) {
     if (-not ($printers | Where-Object Name -eq $Printer)) { throw "No existe la impresora '$Printer'." }
     $printerName = $Printer
 } else {
+    $keep = $null
+    if ($prevCfg -and ($printers | Where-Object Name -eq $prevCfg.printer)) { $keep = [string]$prevCfg.printer }
+    $hint = ''
+    if ($keep) { $hint = " (Enter: seguir con '$keep')" }
+    $printerName = $null
     do {
-        $sel = Read-Host 'Numero de la impresora de etiquetas (la Xprinter)'
+        $sel = Read-Host "Numero de la impresora de etiquetas$hint"
+        if (-not $sel -and $keep) { $printerName = $keep; break }
         $n = 0
         $ok = [int]::TryParse($sel, [ref]$n) -and $n -ge 1 -and $n -le $printers.Count
     } until ($ok)
-    $printerName = $printers[$n - 1].Name
+    if (-not $printerName) { $printerName = $printers[$n - 1].Name }
 }
 Write-Host "Seleccionada: $printerName" -ForegroundColor Green
 
@@ -33,10 +51,12 @@ Write-Host "Seleccionada: $printerName" -ForegroundColor Green
 Step 'Revisando programas que usan los puertos 9100/9101'
 # Un agente anterior escucha via http.sys, que figura como PID 4 y no lo encuentra el filtro de
 # abajo: hay que detenerlo por su linea de comando, o el nuevo no puede abrir los puertos.
-Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+foreach ($name in @($TaskName, $OldName)) {
+    Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
+}
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-    Where-Object { $_.CommandLine -like '*AstrobitPrint*agent.ps1*' } |
+    Where-Object { $_.CommandLine -match 'Astro(bit)?Print\\agent\.ps1' } |
     ForEach-Object { Write-Host "Deteniendo agente anterior (PID $($_.ProcessId))"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 2
 $owners = Get-NetTCPConnection -LocalPort 9100, 9101 -State Listen -ErrorAction SilentlyContinue |
@@ -66,19 +86,33 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Copy-Item (Join-Path $Src 'agent.ps1') $Dest -Force
 Copy-Item (Join-Path $Src 'uninstall.ps1') $Dest -Force -ErrorAction SilentlyContinue
 $cfg = [ordered]@{ printer = $printerName; listAllPrinters = $false }
+if ($prevCfg) {
+    foreach ($p in $prevCfg.PSObject.Properties) { if ($p.Name -ne 'printer') { $cfg[$p.Name] = $p.Value } }
+}
 ConvertTo-Json -InputObject $cfg | Set-Content (Join-Path $Dest 'config.json') -Encoding UTF8
+# AstrobitPrint: su respaldo del inicio pasa a la carpeta nueva (uninstall lo restaura desde ahi)
+if (Test-Path $OldDest) {
+    $oldBak = Join-Path $OldDest 'startup-backup'
+    if (Test-Path $oldBak) {
+        $bak = Join-Path $Dest 'startup-backup'
+        New-Item -ItemType Directory -Force -Path $bak | Out-Null
+        Get-ChildItem $oldBak | Move-Item -Destination $bak -Force
+    }
+    Remove-Item $OldDest -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Reemplazado AstrobitPrint ($OldDest)"
+}
 
 # 4. Certificado HTTPS local (la ERP corre en https y llama a https://127.0.0.1:9101)
 Step 'Creando certificado local para HTTPS'
-Get-ChildItem Cert:\LocalMachine\My  | Where-Object { $_.FriendlyName -eq 'AstrobitPrint' } | Remove-Item -ErrorAction SilentlyContinue
-Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.FriendlyName -eq 'AstrobitPrint' } | Remove-Item -ErrorAction SilentlyContinue
-$cert = New-SelfSignedCertificate -Subject 'CN=localhost' -FriendlyName 'AstrobitPrint' `
+Get-ChildItem Cert:\LocalMachine\My, Cert:\LocalMachine\Root |
+    Where-Object { $_.FriendlyName -in 'AstroPrint', $OldName } | Remove-Item -ErrorAction SilentlyContinue
+$cert = New-SelfSignedCertificate -Subject 'CN=localhost' -FriendlyName 'AstroPrint' `
     -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(10) `
     -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -KeyExportPolicy NonExportable `
     -TextExtension @('2.5.29.17={text}DNS=localhost&IPAddress=127.0.0.1', '2.5.29.37={text}1.3.6.1.5.5.7.3.1')
-$cer = Join-Path $env:TEMP 'astrobitprint.cer'
+$cer = Join-Path $env:TEMP 'astroprint.cer'
 Export-Certificate -Cert $cert -FilePath $cer | Out-Null
-Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | ForEach-Object { $_.FriendlyName = 'AstrobitPrint' }
+Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | ForEach-Object { $_.FriendlyName = 'AstroPrint' }
 Remove-Item $cer -Force
 
 & netsh http delete sslcert ipport=0.0.0.0:9101 2>&1 | Out-Null

@@ -1,4 +1,4 @@
-﻿# AstrobitPrint agent
+﻿# AstroPrint agent (hasta la version 7 se llamaba AstrobitPrint)
 # Responde en 127.0.0.1:9100 (HTTP) y :9101 (HTTPS) con la misma API que Zebra Browser Print
 # (/default, /available, /write, /read, /config, /convert) y envía el ZPL en RAW a una cola de
 # Windows. /convert recibe las etiquetas que el courier entrega en PDF (la ERP las pasa a JPEG) y
@@ -10,6 +10,8 @@ $ErrorActionPreference = 'Continue'
 $Root    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $CfgPath = Join-Path $Root 'config.json'
 $LogPath = Join-Path $Root 'agent.log'
+# La ERP lo lee en https://127.0.0.1:9101/ para saber que AstroPrint esta instalado y su version.
+$Version = '8.0.0'
 
 function Write-Log([string]$msg) {
     $line = "{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
@@ -53,7 +55,7 @@ public static class RawPrinter {
         if (!OpenPrinter(printer, out h, IntPtr.Zero))
             throw new Exception("OpenPrinter fallo (" + Marshal.GetLastWin32Error() + ") para '" + printer + "'");
         try {
-            var di = new DOCINFO { pDocName = "Astrobit ZPL", pDataType = "RAW" };
+            var di = new DOCINFO { pDocName = "AstroPrint ZPL", pDataType = "RAW" };
             int job = StartDocPrinter(h, 1, di);
             if (job == 0)
                 throw new Exception("StartDocPrinter fallo (" + Marshal.GetLastWin32Error() + ")");
@@ -92,7 +94,7 @@ function Get-PrinterProblem([string]$name) {
     # que no salgan todas juntas cuando vuelva la impresora. Las recientes sin error se respetan
     # (una tanda grande tarda lo que tarda en imprimirse).
     $stuck = @(Get-PrintJob -PrinterName $name -ErrorAction SilentlyContinue | Where-Object {
-        $_.DocumentName -eq 'Astrobit ZPL' -and
+        $_.DocumentName -eq 'AstroPrint ZPL' -and
         ([string]$_.JobStatus -match $BadState -or $_.SubmittedTime -lt (Get-Date).AddMinutes(-2))
     })
     if ($stuck.Count) {
@@ -443,7 +445,7 @@ function Handle($ctx) {
 
     switch ($path) {
         '' {
-            Send-Response $ctx 200 '{"status":"ok","agent":"AstrobitPrint"}'
+            Send-Response $ctx 200 (ConvertTo-Json -InputObject ([ordered]@{ status = 'ok'; agent = 'AstroPrint'; version = $Version }) -Compress)
         }
         'default' {
             $dev = New-Device ([string]$cfg.printer)
@@ -508,7 +510,7 @@ function Handle($ctx) {
 # Una sola instancia: la vigia lo lanza cada minuto y, si ya hay uno vivo, este sale. Si el
 # mutex es de SYSTEM y esto corre como usuario, abrirlo falla: tambien significa que hay otro.
 try {
-    $mutex = New-Object System.Threading.Mutex($false, 'Global\AstrobitPrintAgent')
+    $mutex = New-Object System.Threading.Mutex($false, 'Global\AstroPrintAgent')
     try { $owned = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
 } catch { $owned = $false }
 if (-not $owned) { exit 0 }
@@ -531,7 +533,7 @@ while ($true) {
         continue
     }
     $lastError = $null
-    Write-Log "Agente iniciado. Impresora: $((Get-Config).printer)"
+    Write-Log "AstroPrint $Version iniciado. Impresora: $((Get-Config).printer)"
 
     while ($listener.IsListening) {
         try { $ctx = $listener.GetContext() }
