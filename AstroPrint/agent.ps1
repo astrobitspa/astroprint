@@ -11,7 +11,7 @@ $Root    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $CfgPath = Join-Path $Root 'config.json'
 $LogPath = Join-Path $Root 'agent.log'
 # La ERP lo lee en https://127.0.0.1:9101/ para saber que AstroPrint esta instalado y su version.
-$Version = '8.0.0'
+$Version = '8.1.0'
 
 function Write-Log([string]$msg) {
     $line = "{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
@@ -80,16 +80,26 @@ public static class RawPrinter {
 # queda esperando en Windows: la ERP la da por impresa y sale horas despues, al prender la
 # impresora, o repetida si el operario reintento.
 $BadState = 'Offline|Paused|Error|Paper|NotAvailable|UserIntervention|DoorOpen|NoToner|OutputBinFull|Blocked'
+# Puertos de impresoras que no son papel (PDF, XPS, OneNote, fax, archivo): no se ofrecen para elegir.
+$VirtualPort = '^(PORTPROMPT:|FILE:|nul:|SHRFAX:|XPSPort:|Microsoft\.Office\.OneNote)'
+
+# Por que no imprimiria ahora (en error, apagada, sin cable), o $null. Sin efectos, para poder
+# mostrarlo junto a cada impresora de la lista.
+function Get-PrinterOffline($pr) {
+    if ([string]$pr.PrinterStatus -match $BadState) {
+        return "La impresora '$($pr.Name)' esta '$($pr.PrinterStatus)' (apagada o desconectada?)"
+    }
+    if ($pr.PortName -match '^USB\d+$' -and -not [AstroUtil]::UsbPortPresent($pr.PortName)) {
+        return "La impresora '$($pr.Name)' no esta conectada en $($pr.PortName) (apagada o sin cable USB)"
+    }
+    return $null
+}
 
 function Get-PrinterProblem([string]$name) {
     $pr = Get-Printer -Name $name -ErrorAction SilentlyContinue
     if (-not $pr) { return "La impresora '$name' no existe en Windows" }
-    if ([string]$pr.PrinterStatus -match $BadState) {
-        return "La impresora '$name' esta '$($pr.PrinterStatus)' (apagada o desconectada?)"
-    }
-    if ($pr.PortName -match '^USB\d+$' -and -not [AstroUtil]::UsbPortPresent($pr.PortName)) {
-        return "La impresora '$name' no esta conectada en $($pr.PortName) (apagada o sin cable USB)"
-    }
+    $offline = Get-PrinterOffline $pr
+    if ($offline) { return $offline }
     # Etiquetas nuestras con error o de hace mas de 2 minutos: no estan saliendo. Se borran para
     # que no salgan todas juntas cuando vuelva la impresora. Las recientes sin error se respetan
     # (una tanda grande tarda lo que tarda en imprimirse).
@@ -243,6 +253,100 @@ function Get-Config {
     catch { Write-Log "No se pudo leer config.json: $_"; return $null }
 }
 
+# Ajustes de la etiqueta en config.json y sus limites. La ERP los cambia con POST /astroprint
+# (Configuracion > Impresora) y cada trabajo los vuelve a leer: rigen desde la etiqueta siguiente.
+# Desplazamientos y largo en puntos (203 dpi: 8 por mm).
+$Limits = @{
+    labelLengthDots = @(160, 3200)
+    shiftDown       = @(-120, 120)
+    shiftRight      = @(-120, 120)
+    darkness        = @(-15, 15)
+}
+$MediaTypes = @('gap', 'continuous', 'mark')
+
+# Hasta la version 8.0 el rollo continuo se pedia con "gapMedia": false.
+function Get-Media($cfg) {
+    if ($MediaTypes -contains [string]$cfg.media) { return [string]$cfg.media }
+    if ($cfg.gapMedia -eq $false) { return 'continuous' }
+    return 'gap'
+}
+
+function Set-Config([hashtable]$changes) {
+    $cfg = [ordered]@{}
+    $cur = Get-Config
+    if ($cur) { foreach ($p in $cur.PSObject.Properties) { $cfg[$p.Name] = $p.Value } }
+    foreach ($k in $changes.Keys) { $cfg[$k] = $changes[$k] }
+    ConvertTo-Json -InputObject $cfg | Set-Content $CfgPath -Encoding UTF8
+}
+
+function Get-Connection($pr, $port) {
+    if ($pr.PortName -match '^USB\d+$') { return 'usb' }
+    if ($port.PrinterHostAddress -or $pr.PortName -match '^(WSD-|\\\\)' -or $pr.Type -eq 'Connection') { return 'network' }
+    return 'other'
+}
+
+# Las impresoras de Windows que la ERP ofrece elegir, con como estan conectadas.
+function Get-PrinterList {
+    $ports = @{}
+    Get-PrinterPort -ErrorAction SilentlyContinue | ForEach-Object { $ports[$_.Name] = $_ }
+    Get-Printer -ErrorAction SilentlyContinue | Where-Object { $_.PortName -notmatch $VirtualPort } |
+        Sort-Object Name | ForEach-Object {
+            $port = $ports[$_.PortName]
+            [ordered]@{
+                name       = $_.Name
+                connection = Get-Connection $_ $port
+                address    = [string]$port.PrinterHostAddress
+                problem    = Get-PrinterOffline $_
+            }
+        }
+}
+
+function Get-State {
+    $cfg = Get-Config
+    [ordered]@{
+        agent    = 'AstroPrint'
+        version  = $Version
+        printer  = [string]$cfg.printer
+        settings = [ordered]@{
+            media           = Get-Media $cfg
+            labelLengthDots = Get-LabelLength
+            shiftDown       = [int]$cfg.shiftDown
+            shiftRight      = [int]$cfg.shiftRight
+            darkness        = [int]$cfg.darkness
+        }
+        printers = @(Get-PrinterList)
+    }
+}
+
+# Valida lo que manda la ERP y lo guarda. Devuelve por que no, o $null.
+function Save-Settings([string]$body) {
+    try { $in = $body | ConvertFrom-Json } catch { return 'JSON invalido' }
+    $changes = @{}
+    foreach ($p in $in.PSObject.Properties) {
+        $k = $p.Name; $v = [string]$p.Value
+        if ($k -eq 'printer') {
+            if (-not $v -or -not (Get-Printer -Name $v -ErrorAction SilentlyContinue)) { return "La impresora '$v' no existe en Windows" }
+            $changes.printer = $v
+        } elseif ($k -eq 'media') {
+            if ($MediaTypes -notcontains $v) { return "Tipo de rollo desconocido: $v" }
+            $changes.media = $v
+        } elseif ($Limits.ContainsKey($k)) {
+            $n = 0
+            if (-not [int]::TryParse($v, [ref]$n) -or $n -lt $Limits[$k][0] -or $n -gt $Limits[$k][1]) {
+                return "$k fuera de rango ($($Limits[$k][0]) a $($Limits[$k][1]))"
+            }
+            $changes[$k] = $n
+        } else {
+            return "Ajuste desconocido: $k"
+        }
+    }
+    if ($changes.Count) {
+        Set-Config $changes
+        Write-Log ("Ajustes: {0}" -f (ConvertTo-Json -InputObject $changes -Compress))
+    }
+    return $null
+}
+
 function New-Device([string]$name) {
     [ordered]@{
         deviceType   = 'printer'
@@ -257,7 +361,7 @@ function New-Device([string]$name) {
 
 function Get-DeviceList($cfg) {
     $names = New-Object System.Collections.Generic.List[string]
-    $names.Add([string]$cfg.printer)
+    if ($cfg.printer) { $names.Add([string]$cfg.printer) }
     if ($cfg.listAllPrinters) {
         try {
             Get-Printer -ErrorAction Stop | ForEach-Object {
@@ -298,14 +402,23 @@ function Read-BodyBytes($req) {
 # Al comienzo de cada etiqueta (despues de cada ^XA):
 #  - ^LH0,0^LT0: el origen de la etiqueta. La impresora lo guarda de un trabajo al siguiente. El ZPL
 #    de Mercado Libre termina en ^LH0,410, y todo lo que venia despues partia 51 mm mas abajo y se
-#    cortaba (visto en la Xprinter de electrolandia).
+#    cortaba (visto en una Xprinter en bodega). "shiftDown" y "shiftRight" corren la etiqueta
+#    (^LT y ^LS) cuando la impresora la saca desplazada.
 #  - ^MNY^MMT: etiquetas con separacion y corte a mano; sin ^MNY la Xprinter puede tomar el rollo
-#    como continuo. "gapMedia": false en config.json lo saca (rollo continuo de verdad).
+#    como continuo. "media" en config.json: "continuous" (^MNN) o "mark", marca negra (^MNM).
+#  - ^MD: "darkness", mas oscura (+) o mas clara (-) que lo que tenga la impresora.
 #  - ^LL con el largo de la etiqueta si el formato no lo trae (el de Mercado Libre no lo trae).
 # Si el ZPL del courier trae sus propios ^LH/^MN, van despues y mandan esos.
 function Get-LabelSetup {
-    $setup = '^LH0,0^LT0'
-    if ((Get-Config).gapMedia -ne $false) { $setup += '^MNY^MMT' }
+    $cfg = Get-Config
+    $setup = '^LH0,0^LT{0}' -f [int]$cfg.shiftDown
+    if ([int]$cfg.shiftRight) { $setup += '^LS{0}' -f (-[int]$cfg.shiftRight) }
+    switch (Get-Media $cfg) {
+        'gap'        { $setup += '^MNY^MMT' }
+        'mark'       { $setup += '^MNM^MMT' }
+        'continuous' { $setup += '^MNN^MMT' }
+    }
+    if ([int]$cfg.darkness) { $setup += '^MD{0}' -f [int]$cfg.darkness }
     return $setup
 }
 
@@ -409,6 +522,7 @@ function Format-Zpl([string]$zpl) {
 
 function Send-Zpl($ctx, [string]$target, [string]$zpl, [string]$what) {
     try {
+        if (-not $target) { throw 'AstroPrint no tiene impresora elegida: elígela en Astrobit, Configuración > Impresora.' }
         $problem = Get-PrinterProblem $target
         if ($problem) { throw $problem }
         $zpl = Format-Zpl $zpl
@@ -448,6 +562,9 @@ function Handle($ctx) {
             Send-Response $ctx 200 (ConvertTo-Json -InputObject ([ordered]@{ status = 'ok'; agent = 'AstroPrint'; version = $Version }) -Compress)
         }
         'default' {
+            # Instalado con el asistente, la impresora se elige despues en la ERP. Mientras tanto no
+            # hay predeterminada, como en Browser Print sin impresora: respuesta vacia.
+            if (-not $cfg.printer) { Send-Response $ctx 200 '' 'text/plain'; return }
             $dev = New-Device ([string]$cfg.printer)
             if ($req.QueryString['type']) {
                 # BrowserPrint.js (la libreria de Zebra) pide ?type=printer y espera JSON.
@@ -461,7 +578,7 @@ function Handle($ctx) {
             }
         }
         'available' {
-            $list = Get-DeviceList $cfg
+            $list = @(Get-DeviceList $cfg)
             Send-Response $ctx 200 (ConvertTo-Json -InputObject ([ordered]@{ printer = $list }) -Depth 4 -Compress)
         }
         'config' {
@@ -473,12 +590,12 @@ function Handle($ctx) {
         }
         'write' {
             $p = Get-ZplFromBody (Read-Body $req)
-            $target = $p.deviceName
-            if (-not $target) { $target = [string]$cfg.printer }
-            # Si la ERP manda el nombre de una Zebra que no existe en este PC, usar la configurada.
-            if ($target -ne [string]$cfg.printer -and -not (Get-Printer -Name $target -ErrorAction SilentlyContinue)) {
-                Write-Log "Impresora '$target' no existe aqui; usando '$($cfg.printer)'"
-                $target = [string]$cfg.printer
+            # Imprime en la elegida en config.json. El nombre que manda la ERP es el que guardo el
+            # navegador: solo cuenta con listAllPrinters, o un navegador que guardo la impresora
+            # anterior seguiria imprimiendo en esa despues de cambiarla.
+            $target = [string]$cfg.printer
+            if ($cfg.listAllPrinters -and $p.deviceName -and (Get-Printer -Name $p.deviceName -ErrorAction SilentlyContinue)) {
+                $target = $p.deviceName
             }
             Send-Zpl $ctx $target $p.data 'ZPL'
         }
@@ -496,6 +613,15 @@ function Handle($ctx) {
                 Send-Response $ctx 400 "imagen ilegible: $($_.Exception.Message)" 'text/plain'; return
             }
             Send-Zpl $ctx ([string]$cfg.printer) $zpl ("imagen {0} bytes" -f $img.Length)
+        }
+        'astroprint' {
+            # La pestaña Impresora de la ERP: impresoras de Windows, la elegida y los ajustes; con
+            # POST, los cambia.
+            if ($req.HttpMethod -eq 'POST') {
+                $err = Save-Settings (Read-Body $req)
+                if ($err) { Send-Response $ctx 400 $err 'text/plain'; return }
+            }
+            Send-Response $ctx 200 (ConvertTo-Json -InputObject (Get-State) -Depth 5 -Compress)
         }
         'read' {
             # Las impresoras por driver no devuelven datos; Browser Print responde vacío igual.
@@ -538,7 +664,12 @@ while ($true) {
     while ($listener.IsListening) {
         try { $ctx = $listener.GetContext() }
         catch { Write-Log "Se cayo la escucha: $_"; break }
-        try { Handle $ctx } catch { Write-Log "Error de solicitud: $_" }
+        try { Handle $ctx }
+        catch {
+            # Sin respuesta, el navegador esperaria hasta agotar su plazo: que sepa que fallo.
+            Write-Log "Error de solicitud: $_"
+            try { Send-Response $ctx 500 "Error en AstroPrint: $_" 'text/plain' } catch { }
+        }
     }
     try { $listener.Close() } catch { }
     Start-Sleep -Seconds 2

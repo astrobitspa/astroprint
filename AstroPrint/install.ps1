@@ -1,6 +1,8 @@
 ﻿# Instalador de AstroPrint (ejecutar como administrador; install.bat lo hace solo)
 # Sin preguntas: install.ps1 -Printer "Xprinter XP-420B" -KeepAwake S
-param([string]$Printer, [ValidateSet('S', 'N', '')][string]$KeepAwake = '')
+# -Unattended es el asistente (AstroPrint-Setup.exe): nada de consola, la impresora se elige
+# despues en la ERP y lo que pase queda en install.log.
+param([string]$Printer, [ValidateSet('S', 'N', '')][string]$KeepAwake = '', [switch]$Unattended)
 $ErrorActionPreference = 'Stop'
 $Src       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Dest      = Join-Path $env:ProgramData 'AstroPrint'
@@ -21,31 +23,38 @@ foreach ($dir in @($Dest, $OldDest)) {
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 
-# 1. Elegir impresora
+if ($Unattended) {
+    New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+    Start-Transcript -Path (Join-Path $Dest 'install.log') -Force | Out-Null
+}
+
+# 1. Elegir impresora. Sin elegir, queda vacia y se elige en la ERP (Configuracion > Impresora).
 Step 'Impresoras instaladas en este PC'
 $printers = @(Get-Printer | Sort-Object Name)
-if ($printers.Count -eq 0) { throw 'No hay impresoras instaladas en Windows.' }
 for ($i = 0; $i -lt $printers.Count; $i++) {
     Write-Host ("  [{0}] {1}   ({2})" -f ($i + 1), $printers[$i].Name, $printers[$i].DriverName)
 }
+$keep = ''
+if ($prevCfg -and ($printers | Where-Object Name -eq $prevCfg.printer)) { $keep = [string]$prevCfg.printer }
 if ($Printer) {
     if (-not ($printers | Where-Object Name -eq $Printer)) { throw "No existe la impresora '$Printer'." }
     $printerName = $Printer
+} elseif ($Unattended -or $printers.Count -eq 0) {
+    $printerName = $keep
 } else {
-    $keep = $null
-    if ($prevCfg -and ($printers | Where-Object Name -eq $prevCfg.printer)) { $keep = [string]$prevCfg.printer }
-    $hint = ''
+    $hint = " (Enter: elegirla despues en Astrobit)"
     if ($keep) { $hint = " (Enter: seguir con '$keep')" }
     $printerName = $null
     do {
         $sel = Read-Host "Numero de la impresora de etiquetas$hint"
-        if (-not $sel -and $keep) { $printerName = $keep; break }
+        if (-not $sel) { $printerName = $keep; break }
         $n = 0
         $ok = [int]::TryParse($sel, [ref]$n) -and $n -ge 1 -and $n -le $printers.Count
     } until ($ok)
-    if (-not $printerName) { $printerName = $printers[$n - 1].Name }
+    if ($null -eq $printerName) { $printerName = $printers[$n - 1].Name }
 }
-Write-Host "Seleccionada: $printerName" -ForegroundColor Green
+if ($printerName) { Write-Host "Seleccionada: $printerName" -ForegroundColor Green }
+else { Write-Host 'Sin impresora: se elige en Astrobit, Configuracion > Impresora.' -ForegroundColor Yellow }
 
 # 2. Liberar puertos 9100/9101 (Zebra Browser Print, Text2Barcode u otro agente)
 Step 'Revisando programas que usan los puertos 9100/9101'
@@ -64,8 +73,10 @@ $owners = Get-NetTCPConnection -LocalPort 9100, 9101 -State Listen -ErrorAction 
 foreach ($procId in $owners) {
     $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
     if ($p) {
-        $ans = Read-Host ("'{0}' esta usando los puertos. ¿Cerrarlo? (S/N)" -f $p.ProcessName)
-        if ($ans -match '^[sS]') { Stop-Process -Id $procId -Force }
+        # El asistente ya avisa que AstroPrint reemplaza a Browser Print: se cierra sin preguntar.
+        $ans = 'S'
+        if (-not $Unattended) { $ans = Read-Host ("'{0}' esta usando los puertos. ¿Cerrarlo? (S/N)" -f $p.ProcessName) }
+        if ($ans -match '^[sS]') { Write-Host "Cerrando $($p.ProcessName)"; Stop-Process -Id $procId -Force }
         else { throw 'Cierra ese programa y vuelve a ejecutar el instalador.' }
     }
 }
@@ -139,7 +150,7 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($boot, $wa
 Start-ScheduledTask -TaskName $TaskName
 
 # 5b. Un PC de bodega que se suspende deja de imprimir hasta que alguien lo despierte
-if (-not $KeepAwake) { $KeepAwake = Read-Host '¿Evitar que este PC se suspenda o hiberne enchufado? (S/N)' }
+if (-not $KeepAwake -and -not $Unattended) { $KeepAwake = Read-Host '¿Evitar que este PC se suspenda o hiberne enchufado? (S/N)' }
 if ($KeepAwake -match '^[sS]') {
     & powercfg /change standby-timeout-ac 0
     & powercfg /change hibernate-timeout-ac 0
@@ -151,20 +162,21 @@ Step 'Probando el agente'
 # Windows puede dejar la tarea «en cola» hasta un par de minutos antes de lanzarla (visto al
 # instalar en un notebook), y el agente compila su parte en C# al arrancar: esperar hasta 3 min.
 Write-Host 'Esperando que Windows arranque el agente (puede tardar hasta 3 minutos)...'
-$d = $null; $t = $null
-for ($i = 0; $i -lt 90 -and -not $d; $i++) {
+# Tiene que responder ESTA version: si responde otra, sigue vivo un agente anterior.
+$expected = [regex]::Match((Get-Content (Join-Path $Src 'agent.ps1') -Raw), "\`$Version = '([^']+)'").Groups[1].Value
+$d = $null; $ok = $false
+for ($i = 0; $i -lt 90 -and -not $ok; $i++) {
     Start-Sleep -Seconds 2
-    try {
-        $d = Invoke-RestMethod -Uri 'https://127.0.0.1:9101/default?type=printer' -TimeoutSec 5
-        # Sin ?type la ERP espera el texto de Browser Print; si llega JSON responde un agente antiguo.
-        $t = (Invoke-WebRequest -UseBasicParsing -Uri 'https://127.0.0.1:9101/default' -TimeoutSec 5).Content
-    } catch { $d = $null }
+    try { $d = Invoke-RestMethod -Uri 'https://127.0.0.1:9101/' -TimeoutSec 5 } catch { $d = $null }
+    $ok = $d.agent -eq 'AstroPrint' -and $d.version -eq $expected
 }
-if (-not $d) {
+if (-not $ok) {
+    if ($d) { throw 'Sigue respondiendo un agente antiguo. Reinicia el PC.' }
     Write-Host "El agente no respondio. Revisa $Dest\agent.log" -ForegroundColor Red
     throw 'El agente no respondio en 3 minutos.'
 }
-if (-not $t.StartsWith('Device:')) { throw 'Sigue respondiendo un agente antiguo. Reinicia el PC.' }
-Write-Host "OK: el agente responde en HTTPS con la impresora '$($d.name)'." -ForegroundColor Green
+Write-Host "OK: AstroPrint $expected responde en HTTPS." -ForegroundColor Green
 
-Write-Host "`nListo. Cierra y vuelve a abrir el navegador, entra a la ERP e imprime una etiqueta de prueba." -ForegroundColor Green
+Write-Host "`nListo. Cierra y vuelve a abrir el navegador y entra a Astrobit, Configuracion > Impresora:" -ForegroundColor Green
+Write-Host 'ahi eliges la impresora, imprimes una prueba y la ajustas.' -ForegroundColor Green
+if ($Unattended) { Stop-Transcript | Out-Null }

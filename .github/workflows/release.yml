@@ -1,14 +1,45 @@
 name: release
 
+# Every push to main builds AstroPrint-Setup.exe (downloadable from the run, to try it before
+# releasing). A v* tag also publishes it with AstroPrint.zip; a tag with a suffix (v8.1.0-rc1) is
+# a pre-release, which the "latest" download link skips.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  setup:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from agent.ps1
+        shell: pwsh
+        run: |
+          $v = [regex]::Match((Get-Content AstroPrint/agent.ps1 -Raw), "\`$Version = '([^']+)'").Groups[1].Value
+          if (-not $v) { throw "No version in agent.ps1" }
+          "ASTROPRINT_VERSION=$v" >> $env:GITHUB_ENV
+
+      - name: Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build AstroPrint-Setup.exe
+        shell: pwsh
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\AstroPrint.iss'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AstroPrint-Setup
+          path: dist/AstroPrint-Setup.exe
+
   release:
+    needs: setup
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,7 +47,7 @@ jobs:
       - name: The tag matches the agent's version
         run: |
           version=$(grep -oP "^\\\$Version = '\K[^']+" AstroPrint/agent.ps1)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+          if [ "${GITHUB_REF_NAME%%-*}" != "v$version" ]; then
             echo "agent.ps1 says $version but the tag is $GITHUB_REF_NAME"
             exit 1
           fi
@@ -24,10 +55,16 @@ jobs:
       - name: Zip
         run: zip -r AstroPrint.zip AstroPrint
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: AstroPrint-Setup
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" AstroPrint.zip \
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" AstroPrint-Setup.exe AstroPrint.zip $prerelease \
             --title "AstroPrint ${GITHUB_REF_NAME#v}" \
-            --notes "Descarga AstroPrint.zip, descomprímelo y abre install.bat. Instrucciones en LEEME.txt."
+            --notes "AstroPrint-Setup.exe: ábrelo y sigue el asistente. AstroPrint.zip: lo mismo con install.bat (instrucciones en LEEME.txt)."

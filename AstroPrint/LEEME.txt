@@ -14,12 +14,15 @@ Antes de instalar
     reemplaza y conserva su impresora y su configuracion.
 
 Instalar
+  Lo mas simple es AstroPrint-Setup.exe, en la misma pagina de descarga: abrelo y sigue el
+  asistente. Con este .zip:
   1. Descomprime AstroPrint.zip (clic derecho > Extraer todo), por ejemplo en el Escritorio.
   2. Doble clic en install.bat y acepta los permisos de administrador. Si Windows avisa que el
      archivo viene de internet, elige "Ejecutar" (o "Mas informacion" > "Ejecutar de todas formas").
-  3. Escribe el numero de la impresora de etiquetas cuando lo pida.
+  3. Escribe el numero de la impresora de etiquetas, o Enter para elegirla despues en Astrobit.
      Al final espera a que el agente responda: puede tardar hasta 3 minutos.
-  4. Cierra y vuelve a abrir el navegador. Imprime una etiqueta desde la ERP.
+  4. Cierra y vuelve a abrir el navegador. En Astrobit, Configuracion > Impresora: elige la
+     impresora, imprime una prueba y ajustala.
 
 Queda instalado en C:\ProgramData\AstroPrint y arranca solo con Windows. Una tarea vigia
 lo revisa cada minuto: si el agente se cayo, lo vuelve a levantar. El instalador pregunta si
@@ -32,28 +35,28 @@ Que imprime
   Cada etiqueta parte con ^LH0,0^LT0 (origen en la esquina), ^MNY (etiquetas con separacion) y
   el largo de 150 mm si el ZPL no lo trae. La Xprinter guarda el origen de un trabajo al siguiente
   y el ZPL de Mercado Libre lo deja corrido: sin esto las etiquetas siguientes salen mas abajo y
-  cortadas. Con rollo continuo de verdad: "gapMedia": false en config.json; con otro largo de
-  etiqueta: "labelLengthDots" (150 mm = 1199).
+  cortadas. El tipo de rollo, el largo, el desplazamiento y la oscuridad se ajustan en Astrobit,
+  Configuracion > Impresora, y quedan en config.json ("media", "labelLengthDots", "shiftDown",
+  "shiftRight", "darkness").
   La etiqueta de Mercado Libre con detalle de producto mide ~187 mm y no cabe en 10x15: sale en
   2 etiquetas, el detalle en una y la de envio completa en la otra, las dos desde arriba.
   Si la impresora esta apagada o sin cable, la ERP recibe el error (ofrece "Ver en PDF") en vez
   de dejar la etiqueta esperando en Windows para salir mas tarde.
 
 Cambiar de impresora
-  Vuelve a ejecutar install.bat, o edita C:\ProgramData\AstroPrint\config.json
-  y reinicia el PC.
+  En Astrobit, Configuracion > Impresora. Sirve cualquiera instalada en Windows: USB o de red
+  (cable o Wi-Fi).
 
 Si algo falla
-  Revisa C:\ProgramData\AstroPrint\agent.log
+  En Astrobit, Configuracion > Impresora: cada paso dice lo que falta. Si no encuentra
+  AstroPrint, en Chrome dale al sitio el permiso de red local (candado junto a la direccion).
+  Revisa C:\ProgramData\AstroPrint\agent.log (y install.log si instalaste con el asistente).
   Prueba en el navegador: https://127.0.0.1:9101/  (debe mostrar la version de AstroPrint)
-  Prueba en el navegador: https://127.0.0.1:9101/default  (debe mostrar el nombre de la impresora)
-  En la ERP: Configuracion > Impresora > "Buscar impresora predeterminada" (saca al navegador
-  del modo PDF). Si dice que no encontro impresora, en Chrome dale al sitio el permiso de
-  acceso a apps de este dispositivo / red local:
-  chrome://settings/content/siteDetails?site=https://<tenant>.astrobit.cl
 
 Desinstalar
-  Doble clic en uninstall.bat. Restaura Browser Print en el inicio si estaba.
+  Instalado con AstroPrint-Setup.exe: Configuracion de Windows > Aplicaciones > AstroPrint.
+  Con el .zip: doble clic en uninstall.bat. Las dos formas restauran Browser Print en el inicio
+  si estaba.
 
 Nota: en este PC AstroPrint reemplaza a Zebra Browser Print (usan los mismos puertos): no uses
 los dos a la vez.
