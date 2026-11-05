@@ -8,7 +8,9 @@ Que hace
   Solo Windows.
 
 Antes de instalar
-  - La impresora debe estar instalada en Windows e imprimir su pagina de prueba.
+  - La impresora debe estar enchufada y prendida. Si Windows la detecta pero no la instala
+    (pasa con la Xprinter, que no trae driver), AstroPrint la crea solo con el driver
+    "Generic / Text Only" de Windows al abrir Astrobit, Configuracion > Impresora.
   - Cierra Text2Barcode si esta abierto (usa los mismos puertos). El instalador igual lo detecta.
   - Si este PC tiene AstrobitPrint (el nombre anterior de AstroPrint), el instalador lo
     reemplaza y conserva su impresora y su configuracion.

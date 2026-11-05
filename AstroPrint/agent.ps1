@@ -11,7 +11,7 @@ $Root    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $CfgPath = Join-Path $Root 'config.json'
 $LogPath = Join-Path $Root 'agent.log'
 # La ERP lo lee en https://127.0.0.1:9101/ para saber que AstroPrint esta instalado y su version.
-$Version = '8.1.0'
+$Version = '8.2.0'
 
 function Write-Log([string]$msg) {
     $line = "{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
@@ -134,6 +134,7 @@ using System;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -227,6 +228,40 @@ public static class AstroUtil {
     static extern bool SetupDiGetDeviceInstanceId(IntPtr set, ref SP_DEVINFO_DATA data, StringBuilder id, int size, out int required);
     [DllImport("setupapi.dll", SetLastError = true)]
     static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+    [DllImport("setupapi.dll", EntryPoint = "SetupDiGetDeviceRegistryPropertyW", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiGetDeviceRegistryProperty(IntPtr set, ref SP_DEVINFO_DATA data, int property,
+        out int regType, byte[] buffer, int size, out int required);
+
+    static string DeviceText(IntPtr set, ref SP_DEVINFO_DATA d, int property) {
+        var buf = new byte[1024];
+        int type, req;
+        if (!SetupDiGetDeviceRegistryProperty(set, ref d, property, out type, buf, buf.Length, out req)) return "";
+        return Encoding.Unicode.GetString(buf, 0, Math.Min(req, buf.Length)).TrimEnd('\0').Trim();
+    }
+
+    // Impresoras USB enchufadas que Windows dejo sin driver, como "USB006<TAB>Xprinter XP-420B".
+    // Windows las detecta y les arma el puerto, pero les pone el «dispositivo de impresion
+    // generico» (clase SoftwareDevice) o ninguno, y no crea la impresora. Las que tienen driver
+    // son de la clase Printer.
+    public static string[] DriverlessUsbPrinters() {
+        var found = new List<string>();
+        IntPtr set = SetupDiGetClassDevs(IntPtr.Zero, "USBPRINT", IntPtr.Zero, 0x2 | 0x4); // PRESENT | ALLCLASSES
+        if (set == new IntPtr(-1)) return found.ToArray();
+        try {
+            var d = new SP_DEVINFO_DATA();
+            d.cbSize = Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+            for (int i = 0; SetupDiEnumDeviceInfo(set, i, ref d); i++) {
+                var id = new StringBuilder(512);
+                int req;
+                if (!SetupDiGetDeviceInstanceId(set, ref d, id, id.Capacity, out req)) continue;
+                string port = id.ToString().Substring(id.ToString().LastIndexOf('&') + 1);
+                if (!port.StartsWith("USB", StringComparison.OrdinalIgnoreCase)) continue;
+                if (DeviceText(set, ref d, 0x07) == "Printer") continue;                // SPDRP_CLASS
+                found.Add(port.ToUpperInvariant() + "\t" + DeviceText(set, ref d, 0x0C)); // SPDRP_FRIENDLYNAME
+            }
+        } finally { SetupDiDestroyDeviceInfoList(set); }
+        return found.ToArray();
+    }
 
     // ¿Hay una impresora USB enchufada y prendida en ese puerto (USB001...)? Con la impresora apagada
     // Windows igual acepta el trabajo; asi la ERP recibe el error en el momento.
@@ -285,8 +320,37 @@ function Get-Connection($pr, $port) {
     return 'other'
 }
 
+# Una impresora USB sin driver (la Xprinter XP-420B, por ejemplo) no aparece para elegir: Windows
+# la detecta y le arma el puerto USB00n, pero no crea la impresora. Se crea aqui con el driver
+# «Generic / Text Only», que viene con Windows y pasa los bytes tal cual: el ZPL llega igual que
+# con el driver del fabricante. Corre cada vez que la ERP pide la lista (Configuracion > Impresora),
+# asi que sirve tambien para la impresora que se enchufa despues de instalar AstroPrint.
+$GenericDriver = 'Generic / Text Only'
+function Add-MissingUsbPrinters {
+    $found = [AstroUtil]::DriverlessUsbPrinters()
+    if (-not $found.Count) { return }
+    $printers = @(Get-Printer -ErrorAction SilentlyContinue)
+    foreach ($entry in $found) {
+        $port, $name = $entry -split "`t", 2
+        if ($printers | Where-Object PortName -eq $port) { continue }
+        if (-not $name) { $name = "Impresora USB $port" }
+        if ($printers | Where-Object Name -eq $name) { $name = "$name ($port)" }
+        try {
+            if (-not (Get-PrinterDriver -Name $GenericDriver -ErrorAction SilentlyContinue)) {
+                Add-PrinterDriver -Name $GenericDriver -ErrorAction Stop
+            }
+            Add-Printer -Name $name -DriverName $GenericDriver -PortName $port -ErrorAction Stop
+            $printers += [pscustomobject]@{ Name = $name; PortName = $port }  # dos del mismo modelo
+            Write-Log "Impresora USB sin driver en ${port}: creada '$name' con '$GenericDriver'"
+        } catch {
+            Write-Log "ERR no se pudo crear la impresora '$name' en ${port}: $($_.Exception.Message)"
+        }
+    }
+}
+
 # Las impresoras de Windows que la ERP ofrece elegir, con como estan conectadas.
 function Get-PrinterList {
+    Add-MissingUsbPrinters
     $ports = @{}
     Get-PrinterPort -ErrorAction SilentlyContinue | ForEach-Object { $ports[$_.Name] = $_ }
     Get-Printer -ErrorAction SilentlyContinue | Where-Object { $_.PortName -notmatch $VirtualPort } |
