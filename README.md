@@ -14,7 +14,12 @@ Print.
 `/astroprint` is AstroPrint's own: `GET` lists Windows' printers (USB / network, and why one
 wouldn't print right now), the chosen one and the label settings; `POST` changes them. The ERP's
 Configuración › Impresora uses it to pick the printer and to fix a misaligned label without
-touching the PC:
+touching the PC. Before listing, it creates the Windows printer for any USB printer that Windows
+detected but left without a driver (the Xprinter XP-420B: Windows makes its `USB00n` port and
+binds the generic printer device, but no queue), with the inbox `Generic / Text Only` driver,
+which passes the ZPL through untouched. So a printer plugged in after installing shows up too.
+
+The label settings:
 
 | `config.json` | ZPL added to every label | Range |
 |---|---|---|
